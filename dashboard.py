@@ -2,6 +2,8 @@
 import threading
 import time
 import math
+import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -40,6 +42,21 @@ recording_event = threading.Event()
 connection_status = "Not recording"
 last_error = ""
 last_sample_ms = None  # Teensy millis() of the last stored sample, used to skip duplicates
+
+# ============================================================
+# Autosave state (secondary feature, runs in its own thread)
+# ============================================================
+
+# Autosave files are written next to this script.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+autosave_lock = threading.Lock()   # protects the autosave_* variables below
+autosave_started = threading.Event()
+autosave_interval_s = 30.0
+autosave_path = None               # e.g. .../autosaved_data_run_3.csv
+autosaved_count = 0                # number of samples already written to disk
+autosave_last_time = ""
+autosave_last_error = ""
 
 # ============================================================
 # HTTP setpoint communication
@@ -125,6 +142,78 @@ def insert_gaps(timestamps, values, max_gap_s):
         previous = t
 
     return xs, ys
+
+
+# ============================================================
+# Autosave
+# ============================================================
+
+def next_autosave_path():
+    """
+    Return the path for the next run: autosaved_data_run_<N>.csv in the
+    script's folder, where N is one more than the highest existing run.
+    """
+
+    pattern = re.compile(r"^autosaved_data_run_(\d+)\.csv$")
+    runs = [
+        int(m.group(1))
+        for name in os.listdir(SCRIPT_DIR)
+        if (m := pattern.match(name))
+    ]
+    run_number = max(runs, default=0) + 1
+
+    return os.path.join(SCRIPT_DIR, f"autosaved_data_run_{run_number}.csv")
+
+
+def autosave_new_samples():
+    """Append the samples not yet on disk to this run's autosave file."""
+    global autosaved_count, autosave_last_time
+
+    with autosave_lock:
+        path = autosave_path
+        start_index = autosaved_count
+
+    # Copy only the new rows; hold data_lock as briefly as possible so
+    # acquisition and plotting are never held up by the disk write.
+    with data_lock:
+        new_rows = measurements[start_index:]
+
+    if not new_rows:
+        return
+
+    write_header = not os.path.exists(path)
+
+    with open(path, "a", newline="") as f:
+        pd.DataFrame(new_rows).to_csv(f, header=write_header, index=False)
+        f.flush()
+        os.fsync(f.fileno())  # make sure the data is physically on disk
+
+    with autosave_lock:
+        autosaved_count = start_index + len(new_rows)
+        autosave_last_time = datetime.now().strftime("%H:%M:%S")
+
+
+def autosave_loop():
+    """Background thread: waits for Start Autosaving, then saves every interval."""
+    global autosave_last_error
+
+    autosave_started.wait()
+
+    while True:
+        with autosave_lock:
+            interval = autosave_interval_s
+
+        time.sleep(interval)
+
+        try:
+            autosave_new_samples()
+            with autosave_lock:
+                autosave_last_error = ""
+        except Exception as e:
+            # Never let an autosave problem stop the thread or affect anything else.
+            with autosave_lock:
+                autosave_last_error = str(e)
+            print("Autosave error:", e)
 
 
 # ============================================================
@@ -301,6 +390,41 @@ app.layout = html.Div(
                     "Press Start to begin recording.",
                     id="control-status",
                 ),
+
+                html.Hr(),
+
+                html.Div(
+                    [
+                        html.Label("Time interval between autosaves (s)"),
+                        dcc.Input(
+                            id="autosave-interval",
+                            type="number",
+                            value=30,
+                            min=1,
+                            step="any",
+                            style={"width": "180px"},
+                        ),
+                    ]
+                ),
+
+                html.Br(),
+
+                html.Button(
+                    "Start Autosaving",
+                    id="autosave-button",
+                    n_clicks=0,
+                    style={
+                        "padding": "12px 24px",
+                        "fontSize": "16px",
+                        "cursor": "pointer",
+                    },
+                ),
+
+                html.P(
+                    "Autosave is off.",
+                    id="autosave-control-status",
+                ),
+                html.P("", id="autosave-info"),
             ],
             style={
                 "backgroundColor": "#f4f6f8",
@@ -401,6 +525,60 @@ def start_recording(n_clicks):
     recording_event.set()
 
     return "Recording started.", True
+
+
+# ============================================================
+# Autosave callbacks
+# ============================================================
+
+@app.callback(
+    Output("autosave-control-status", "children"),
+    Input("autosave-button", "n_clicks"),
+    State("autosave-interval", "value"),
+    prevent_initial_call=True,
+)
+def start_autosaving(n_clicks, interval):
+    global autosave_interval_s, autosave_path
+
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError):
+        return "Enter a valid autosave interval in seconds."
+
+    if not math.isfinite(interval) or interval < 1:
+        return "Autosave interval must be at least 1 s."
+
+    with autosave_lock:
+        autosave_interval_s = interval
+        if autosave_path is None:
+            autosave_path = next_autosave_path()
+        path = autosave_path
+
+    already_running = autosave_started.is_set()
+    autosave_started.set()
+
+    filename = os.path.basename(path)
+    if already_running:
+        return f"Autosave interval changed to {interval:g} s ({filename})."
+    return f"Autosaving every {interval:g} s to {filename}."
+
+
+@app.callback(
+    Output("autosave-info", "children"),
+    Input("plot-interval", "n_intervals"),
+)
+def update_autosave_info(n):
+
+    with autosave_lock:
+        last_time = autosave_last_time
+        count = autosaved_count
+        error = autosave_last_error
+
+    if error:
+        return f"Autosave error: {error}"
+    if not last_time:
+        return ""
+    return f"Last autosave: {last_time} ({count} samples on disk)"
 
 
 # ============================================================
@@ -555,6 +733,13 @@ if __name__ == "__main__":
     )
 
     acquisition_thread.start()
+
+    autosave_thread = threading.Thread(
+        target=autosave_loop,
+        daemon=True,
+    )
+
+    autosave_thread.start()
 
     app.run(
         host="127.0.0.1",

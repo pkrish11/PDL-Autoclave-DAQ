@@ -11,7 +11,7 @@ constexpr float R_REF        = 4000.0f; // reference resistor (ohms)
 constexpr float ALPHA        = 0.00385f;// RTD temp coefficient
 constexpr float R_0          = 1000.0f; // RTD resistance at 0 °C
 constexpr int   PRESSURE_PIN = 15;      // pressure sense pin
-constexpr int   HEATER_PIN   = 32; 
+constexpr int   HEATER_PIN   = 33; 
 constexpr int chipSelect = BUILTIN_SDCARD; // Chip-select pin for SD card
 
 
@@ -182,6 +182,8 @@ void loop() {
     sample_ms = lastSampleTime;
 
     temperature = read_temperature();
+    Serial.println(temperature);
+    
     // Serial.print("temp: ");
     // Serial.println(temperature);
     pressure = read_pressure();
@@ -201,6 +203,7 @@ void loop() {
   // Check for HTTP clients
   EthernetClient client = server.accept();
   if (client) {
+    Serial.print("w");
      handleHttpClient(client);
   }
 
