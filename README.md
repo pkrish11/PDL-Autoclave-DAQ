@@ -45,4 +45,4 @@ python3 dashboard.py
 ### Firmware Notes
 * The microcontroller is configured to save data onto a SD card as well, if one is inserted into it. It will store the time-since-execution started, temperature, pressure and heater status a .csv file on the microcontoller.
 * The sampling rate for pressure and temperature is set to ***1***s by default, this can be modified in the .ino file.
-* Heater power should be connected across the COM and NO terminals.
+* Connecting Teensy to Ethernet adapter - the red wire (with small engraved arrow) terminal should go into the "T+" terminal on the adapter.
